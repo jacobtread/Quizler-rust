@@ -1,0 +1,13 @@
+[package]
+name = "Quizler-rust"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+wsbps = "0.1.1"
+actix-web = "4"
+actix-web-actors = "4.1.0"
+actix = "0.13.0"
+anyhow = "1.0.56"
