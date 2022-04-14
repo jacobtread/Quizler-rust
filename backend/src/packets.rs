@@ -23,7 +23,7 @@ packet_data! {
         SKIP: 2
     }
 
-    struct CreateQuestionData (<-) {
+    struct QuestionData (<-) {
         image_type: String,
         image: Vec<u8>,
         question: String,
@@ -49,7 +49,7 @@ packets! {
     }
 
     ClientPackets (<-) {
-        CCreateGame (0x00) { title: String, questions: Vec<CreateQuestionData> }
+        CCreateGame (0x00) { title: String, questions: Vec<QuestionData> }
         CCheckNameTaken (0x01) { id: String, name: String}
         CRequestGameState (0x02) { id: String }
         CRequestJoin (0x03) { id: String, name: String }
