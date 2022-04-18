@@ -16,7 +16,7 @@ use crate::socket::Connection;
 const APP_INDEX: &str = include_str!("../public/index.html");
 
 
-#[get("/")]
+#[get("/{_:.*}")]
 async fn index() -> impl Responder {
     HttpResponse::Ok().content_type("text/html").body(APP_INDEX)
 }
@@ -36,8 +36,8 @@ async fn main() -> std::io::Result<()> {
     HttpServer::new(move || {
         App::new()
             .app_data(web::Data::new(manager.clone()))
-            .service(index)
             .service(ws_route)
+            .service(index)
     })
         .bind(("127.0.0.1", 8080))?
         .run()

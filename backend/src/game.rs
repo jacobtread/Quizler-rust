@@ -1,7 +1,9 @@
 use std::collections::HashMap;
+use std::thread::sleep;
+use std::time::Duration;
 use actix::{Actor, Context, Handler, Message, MessageResult};
 use tokio::time::Instant;
-use crate::packets::QuestionData;
+use crate::packets::{GameState, QuestionData};
 use crate::tools::{Identifier, random_identifier};
 
 pub type AnswerIndex = u8;
@@ -50,12 +52,14 @@ impl GameManager {
             id = random_identifier(Game::ID_LENGTH);
             if !self.games.contains_key(&id) { break; };
         };
-        self.games.insert(id.clone(), Game {
+        let game = Game {
             id: id.clone(),
             title,
             questions,
             players: HashMap::new(),
-        });
+            state: GameState::Waiting,
+        };
+        self.games.insert(id.clone(), game);
         id
     }
 }
@@ -71,6 +75,7 @@ pub struct Game {
     pub title: String,
     pub questions: Vec<QuestionData>,
     pub players: HashMap<Identifier, Player>,
+    pub state: GameState,
 }
 
 impl Actor for Game {

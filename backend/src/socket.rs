@@ -57,16 +57,6 @@ impl Connection {
         }
         fut::ready(())
     }
-
-    fn on_create_game(&self, packet: &CCreateGame, ctx: &mut CContext) {
-        self.manager.send(CreateGame {
-            title: packet.title.clone(),
-            questions: packet.questions.clone(),
-        })
-            .into_actor(self)
-            .then(Connection::on_created_game)
-            .wait(ctx);
-    }
 }
 
 
@@ -81,7 +71,15 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for Connection {
                     Ok(p) => {
                         println!("{:?}", p);
                         match p {
-                            ClientPackets::CCreateGame(c) => self.on_create_game(&c, ctx),
+                            ClientPackets::CCreateGame(packet) => {
+                                self.manager.send(CreateGame {
+                                    title: packet.title,
+                                    questions: packet.questions,
+                                })
+                                    .into_actor(self)
+                                    .then(Connection::on_created_game)
+                                    .wait(ctx);
+                            },
                             ClientPackets::CCheckNameTaken(_) => {}
                             ClientPackets::CRequestGameState(_) => {}
                             ClientPackets::CRequestJoin(_) => {}
