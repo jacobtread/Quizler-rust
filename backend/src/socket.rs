@@ -60,8 +60,8 @@ impl Connection {
         match res {
             Ok(res) => match res {
                 ClientAction::CreatedGame { id, title } => {
-                    act.hosting = true;
-                    act.game_id = Some(id.clone());
+                    act.game_data.hosting= true;
+                    act.game_data.game_id = Some(id.clone());
                     act.packet(ctx, ServerPackets::JoinedGame {
                         owner: true,
                         id: id.clone(),
@@ -77,8 +77,8 @@ impl Connection {
                 }
                 ClientAction::Error(msg) => act.packet(ctx, ServerPackets::Error { cause: String::from(msg) }),
                 ClientAction::JoinedGame { id, player_id, title } => {
-                    act.player_id = Some(player_id);
-                    act.game_id = Some(id.clone());
+                    act.game_data.player_id = Some(player_id);
+                    act.game_data.game_id = Some(id.clone());
                     act.packet(ctx, ServerPackets::JoinedGame {
                         owner: false,
                         id,
@@ -95,17 +95,19 @@ impl Connection {
                         .wait(ctx);
                 }
                 ClientAction::Disconnect => {
-                    act.game_data.reset()
+                    act.game_data.reset();
                 }
                 ClientAction::Multiple(actions) => {
                     for action in actions {
-                        Connection::handle_action(Ok(action), act, ctx)
+                        Connection::handle_action(Ok(action), act, ctx);
                     }
                 }
                 ClientAction::None => {}
-                _ => {}
             }
-            Err(_) => ctx.stop()
+            Err(err) => {
+                error!("err {:?}", err);
+                ctx.stop()
+            }
         }
         ready(())
     }

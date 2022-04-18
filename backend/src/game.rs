@@ -4,6 +4,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use actix::*;
 use actix_web::web::Data;
+use log::info;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use crate::Connection;
 use crate::packets::{ClientPackets, GameState, PlayerDataMode, QuestionData, ServerPackets, StateChange};
@@ -26,13 +27,6 @@ impl GameManager {
         Data::new(GameManager {
             games: Arc::new(RwLock::new(HashMap::new()))
         }.start())
-    }
-
-    pub fn stop(&mut self, game: &mut Game) {
-        game.state = GameState::Stopped;
-        game.broadcast(ServerPackets::Disconnect { reason: String::from("Game ended.") });
-        let mut games = self.games.write().unwrap();
-        games.remove(&game.id);
     }
 }
 
@@ -104,6 +98,7 @@ impl Handler<ServerAction> for GameManager {
                         if !games.contains_key(&id) { break; };
                     };
                     let game = Game {
+                        host: ret,
                         id: id.clone(),
                         title: title.clone(),
                         questions,
@@ -168,19 +163,24 @@ impl Handler<ServerAction> for GameManager {
                                 ]),
                                 Some(game) => {
                                     game.state = GameState::Starting;
-                                    game.broadcast(ServerPackets::GameState { state: GameState::Starting })
+                                    game.broadcast(ServerPackets::GameState { state: GameState::Starting });
+                                    ClientAction::None
                                 }
                             }
                         }
                     }
-                    StateChange::Skip => {}
+                    StateChange::Skip => ClientAction::None,
                     StateChange::Disconnect => {
                         if game_data.game_id.is_some() {
                             let mut games = self.games.write().unwrap();
-                            let game = games.get_mut(&game_data.game_id.unwrap());
+                            let game_id = game_data.game_id.unwrap();
+                            let game = games.remove(&game_id);
+
                             if game.is_some() {
                                 if game_data.hosting {
-                                    self.stop(game.unwrap());
+                                    let mut game = game.unwrap();
+                                    info!("Shutting down game {} ({}) because host left", game.title, game.id);
+                                    game.broadcast(ServerPackets::Disconnect { reason: String::from("Game ended.") });
                                 } else if game_data.player_id.is_some() {
                                     game.unwrap().remove_player(game_data.player_id.unwrap())
                                 }
@@ -198,6 +198,7 @@ impl Handler<ServerAction> for GameManager {
 
 #[derive(Debug)]
 pub struct Game {
+    pub host: Addr<Connection>,
     pub id: Identifier,
     pub title: String,
     pub questions: Vec<QuestionData>,
@@ -221,7 +222,7 @@ impl Game {
         match player {
             None => {}
             Some(player) => {
-                self.broadcast(player.as_data(PlayerDataMode::Remove));
+                players.values().for_each(|p| p.ret.do_send(ClientAction::Packet(player.as_data(PlayerDataMode::Remove))));
             }
         }
     }
@@ -246,6 +247,7 @@ impl Game {
             ret.do_send(ClientAction::Packet(v.as_data(PlayerDataMode::Add)));
         }
         ret.do_send(ClientAction::Packet(player.as_data(PlayerDataMode::Me)));
+        self.host.do_send(ClientAction::Packet(player.as_data(PlayerDataMode::Add)));
         players.insert(id.clone(), player);
         id
     }
