@@ -7,6 +7,7 @@ use std::thread::sleep;
 use std::time::Duration;
 use actix::{Actor, Addr, ArbiterHandle, AsyncContext, Context, Handler, MailboxError, Message, MessageResult, Running, WrapFuture};
 use log::info;
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use tokio::runtime::Handle;
 use tokio::sync::MutexGuard;
 use tokio::time::Instant;
@@ -53,14 +54,6 @@ impl Handler<CreateGame> for GameManager {
             state: GameState::Waiting,
         }));
         self.games.insert(id.clone(), game.clone());
-        thread::spawn( move || {
-            loop {
-                let mut game = game.lock().unwrap();
-                println!("running game loop for {} ({})", game.title.clone(), game.id.clone());
-                sleep(GAME_SLEEP_INTERVAL);
-
-            };
-        });
         MessageResult(CreatedGame {
             id,
             title: msg.title,
@@ -78,6 +71,16 @@ impl GameManager {
 
 impl Actor for GameManager {
     type Context = Context<Self>;
+
+    fn started(&mut self, ctx: &mut Self::Context) {
+        ctx.run_interval(GAME_SLEEP_INTERVAL, |act, ctx| {
+           act.games.par_iter()
+               .for_each(|(id, game)| {
+                   let game = game.lock().unwrap();
+                   println!("running game loop for {} ({})", game.title, game.id);
+               });
+        });
+    }
 }
 
 #[derive(Debug)]
