@@ -66,6 +66,7 @@ pub enum ServerAction {
         state: StateChange,
         game_data: GameData,
     },
+    TryKick { id: Identifier, game_data: GameData },
     None,
 }
 
@@ -78,6 +79,7 @@ pub enum ClientAction {
     Error(&'static str),
     JoinedGame { id: Identifier, player_id: Identifier, title: String },
     StateChange(StateChange),
+    BeginKick(Identifier),
     Disconnect,
     Multiple(Vec<ClientAction>),
     None,
@@ -146,6 +148,7 @@ impl Handler<ServerAction> for GameManager {
                     }
                 }
                 ClientPackets::StateChange { state } => ClientAction::StateChange(state),
+                ClientPackets::Kick { id } => ClientAction::BeginKick(id),
                 _ => ClientAction::None
             }
             ServerAction::DoStateChange { state, game_data } => {
@@ -190,7 +193,26 @@ impl Handler<ServerAction> for GameManager {
                     }
                 }
             }
-            _ => ClientAction::None
+            ServerAction::TryKick { id, game_data } => {
+                if !game_data.hosting {
+                    ClientAction::Error("You are not the host.")
+                } else {
+                    if game_data.game_id.is_some() {
+                        let mut games = self.games.write().unwrap();
+                        let game = games.get_mut(&game_data.game_id.unwrap());
+                        match game {
+                            None => ClientAction::Error("You are not in a game."),
+                            Some(game) => {
+                                game.remove_player(id);
+                                ClientAction::None
+                            }
+                        }
+                    } else {
+                        ClientAction::Error("You are not in a game.")
+                    }
+                }
+            }
+            ServerAction::None => ClientAction::None,
         })
     }
 }
@@ -223,6 +245,10 @@ impl Game {
             None => {}
             Some(player) => {
                 players.values().for_each(|p| p.ret.do_send(ClientAction::Packet(player.as_data(PlayerDataMode::Remove))));
+                player.ret.do_send(ClientAction::Multiple(vec![
+                    ClientAction::Packet(ServerPackets::Disconnect { reason: String::from("Removed from game.") }),
+                    ClientAction::Disconnect
+                ]))
             }
         }
     }
@@ -249,6 +275,7 @@ impl Game {
         ret.do_send(ClientAction::Packet(player.as_data(PlayerDataMode::Me)));
         self.host.do_send(ClientAction::Packet(player.as_data(PlayerDataMode::Add)));
         players.insert(id.clone(), player);
+        info!("Players {:?}", players);
         id
     }
 

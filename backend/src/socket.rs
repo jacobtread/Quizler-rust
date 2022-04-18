@@ -103,6 +103,15 @@ impl Connection {
                     }
                 }
                 ClientAction::None => {}
+                ClientAction::BeginKick(id) => {
+                    act.manager.send(ServerAction::TryKick {
+                        game_data: act.game_data.clone(),
+                        id
+                    })
+                        .into_actor(act)
+                        .then(Connection::handle_action)
+                        .wait(ctx);
+                }
             }
             Err(err) => {
                 error!("err {:?}", err);
