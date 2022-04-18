@@ -6,7 +6,7 @@ use actix::prelude::*;
 use crate::socket::Connection;
 
 pub struct Player {
-    id: String,
+    pub id: String,
     name: String,
     score: u32,
     answers: HashMap<u8, u8>,

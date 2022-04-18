@@ -2,6 +2,7 @@ pub  mod socket;
 pub mod player;
 pub mod game;
 pub mod packets;
+mod tools;
 
 use std::collections::HashMap;
 use std::io::{Cursor, Read};

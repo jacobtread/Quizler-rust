@@ -1,31 +1,36 @@
 use std::io::Cursor;
-use std::sync::Mutex;
-use actix::{Addr, ArbiterHandle, AsyncContext, Context, Running};
+use actix::{Handler, Actor, StreamHandler, AsyncContext};
 use actix_web_actors::ws;
-use packets::ClientPackets;
-use actix::{Actor, StreamHandler};
-use wsbps::io::VarInt;
-use wsbps::Readable;
-use crate::packets::ClientPackets;
-use crate::Player;
+use wsbps::{Readable, Writable};
+use crate::packets::{ClientPackets, ServerPackets};
 
 pub struct Connection {
-    player: Option<Player>,
+    pub player: Option<Player>,
+    pub manager: Addr<GameManager>,
+}
+
+impl Connection {}
+
+impl Handler<ServerPackets> for Connection {
+    type Result = ();
+
+    fn handle(&mut self, mut msg: ServerPackets, ctx: &mut Self::Context) -> Self::Result {
+        let mut out = Vec::new();
+        msg.write(&mut out);
+    }
 }
 
 impl Actor for Connection {
     type Context = ws::WebsocketContext<Self>;
 
     fn started(&mut self, ctx: &mut Self::Context) {
-        ctx.address()
-            .send()
+        let address = ctx.address();
     }
 }
 
 
 impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for Connection {
     fn handle(&mut self, msg: Result<ws::Message, ws::ProtocolError>, ctx: &mut Self::Context) {
-        println!("HERE");
         match msg {
             Ok(ws::Message::Ping(msg)) => ctx.pong(&msg),
             Ok(ws::Message::Text(text)) => ctx.text(text),
