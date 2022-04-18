@@ -6,7 +6,8 @@ use actix::*;
 use actix_web::web::Data;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use crate::Connection;
-use crate::packets::{ClientPackets, GameState, QuestionData, ServerPackets};
+use crate::packets::{ClientPackets, GameState, PlayerDataMode, QuestionData, ServerPackets};
+use crate::packets::ServerPackets::PlayerData;
 use crate::tools::{Identifier, random_identifier};
 
 pub type AnswerIndex = u8;
@@ -165,14 +166,20 @@ impl Game {
             id = random_identifier(Player::ID_LENGTH);
             if !players.contains_key(&id) { break; };
         };
-        players.insert(id.clone(), Player {
+        let player = Player {
             id: id.clone(),
             name: name.clone(),
             score: 0,
             answers: HashMap::new(),
             answer_time: None,
-            ret,
-        });
+            ret: ret.clone(),
+        };
+        for v in players.values() {
+            v.ret.do_send(ClientAction::Packet(player.as_data(PlayerDataMode::Add)));
+            ret.do_send(ClientAction::Packet(v.as_data(PlayerDataMode::Add)));
+        }
+        ret.do_send(ClientAction::Packet(player.as_data(PlayerDataMode::Me)));
+        players.insert(id.clone(), player);
         id
     }
 }
@@ -190,4 +197,12 @@ pub struct Player {
 
 impl Player {
     const ID_LENGTH: usize = 5;
+
+    pub fn as_data(&self, mode: PlayerDataMode) -> ServerPackets {
+        ServerPackets::PlayerData {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            mode
+        }
+    }
 }

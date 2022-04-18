@@ -77,6 +77,14 @@ impl Connection {
     }
 }
 
+impl Handler<ClientAction> for Connection {
+    type Result = ();
+
+    fn handle(&mut self, msg: ClientAction, ctx: &mut Self::Context) -> Self::Result {
+       Connection::handle_action(Ok(msg), self, ctx);
+    }
+}
+
 
 impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for Connection {
     fn handle(&mut self, msg: Result<ws::Message, ws::ProtocolError>, ctx: &mut Self::Context) {
