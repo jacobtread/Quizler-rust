@@ -1,7 +1,10 @@
 use std::collections::HashMap;
+use std::fmt::{Display, Formatter};
+use std::ops::Add;
 use std::thread::sleep;
 use std::time::Duration;
-use actix::{Actor, Context, Handler, Message, MessageResult};
+use actix::{Actor, Addr, ArbiterHandle, AsyncContext, Context, Handler, MailboxError, Message, MessageResult, Running, WrapFuture};
+use log::info;
 use tokio::time::Instant;
 use crate::packets::{GameState, QuestionData};
 use crate::tools::{Identifier, random_identifier};
@@ -27,26 +30,38 @@ pub struct GameManager {
     pub games: HashMap<Identifier, Game>,
 }
 
-impl Handler<CreateGame> for GameManager {
-    type Result = MessageResult<CreateGame>;
+#[derive(Message)]
+#[rtype(result = "GameResponse")]
+enum GameRequest {
+    Details(Identifier)
+}
 
-    fn handle(&mut self, msg: CreateGame, _: &mut Self::Context) -> Self::Result {
-        let id = self.new_game(msg.title, msg.questions);
-        let game = self.games.get(&id)
-            .expect("expected game to be created");
-        MessageResult(CreatedGame {
-            id,
-            title: game.title.clone(),
+enum GameResponseError {
+    UnknownGame
+}
+
+impl Display for GameResponseError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            GameResponseError::UnknownGame => "Unknown Game"
         })
     }
 }
 
-impl GameManager {
-    pub fn new() -> GameManager {
-        GameManager { games: HashMap::new() }
-    }
+#[derive(Message)]
+#[rtype(result = "()")]
+enum GameResponse {
+    Details {
+        name: String,
+        state: GameState,
+    },
+    Error(GameResponseError),
+}
 
-    fn new_game(&mut self, title: String, questions: Vec<QuestionData>) -> Identifier {
+impl Handler<CreateGame> for GameManager {
+    type Result = MessageResult<CreateGame>;
+
+    fn handle(&mut self, msg: CreateGame, ctx: &mut Self::Context) -> Self::Result {
         let mut id: Identifier;
         loop {
             id = random_identifier(Game::ID_LENGTH);
@@ -54,13 +69,70 @@ impl GameManager {
         };
         let game = Game {
             id: id.clone(),
-            title,
-            questions,
+            title: msg.title.clone(),
+            questions: msg.questions,
             players: HashMap::new(),
             state: GameState::Waiting,
         };
         self.games.insert(id.clone(), game);
-        id
+        let tmp_id = id.clone();
+        let addr = ctx.address().clone();
+        tokio::spawn(async move {
+            let id = tmp_id;
+            println!("pre loop");
+            'game: loop {
+                let result: Result<GameResponse, MailboxError> = addr.send(GameRequest::Details(id.clone())).await;
+                match result {
+                    Ok(value) => {
+                        match value {
+                            GameResponse::Details { name, state } => {
+                                println!("Game {} ({}) is {:?}", name, id, state);
+                                sleep(Duration::from_secs(1));
+                            }
+                            GameResponse::Error(err) => {
+                                info!("Error when retrieving game {}", err);
+                                break 'game;
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        break 'game;
+                    }
+                }
+            }
+        });
+        println!("End spawn");
+        MessageResult(CreatedGame {
+            id,
+            title: msg.title,
+        })
+    }
+}
+
+impl Handler<GameRequest> for GameManager {
+    type Result = MessageResult<GameRequest>;
+
+    fn handle(&mut self, msg: GameRequest, _: &mut Self::Context) -> Self::Result {
+        MessageResult(match msg {
+            GameRequest::Details(id) => {
+                let game = self.games.get(&id);
+                match game {
+                    None => GameResponse::Error(GameResponseError::UnknownGame),
+                    Some(value) => {
+                        GameResponse::Details {
+                            state: value.state.clone(),
+                            name: value.title.clone(),
+                        }
+                    }
+                }
+            }
+        })
+    }
+}
+
+impl GameManager {
+    pub fn new() -> GameManager {
+        GameManager { games: HashMap::new() }
     }
 }
 
@@ -76,10 +148,6 @@ pub struct Game {
     pub questions: Vec<QuestionData>,
     pub players: HashMap<Identifier, Player>,
     pub state: GameState,
-}
-
-impl Actor for Game {
-    type Context = Context<Self>;
 }
 
 
