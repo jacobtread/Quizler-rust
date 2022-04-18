@@ -3,16 +3,30 @@ use actix::*;
 use actix_web_actors::ws;
 use wsbps::{Readable, Writable};
 use crate::game::{ClientAction, GameManager, ServerAction};
-use crate::packets::{ClientPackets, GameState, ServerPackets};
+use crate::packets::{ClientPackets, GameState, ServerPackets, StateChange};
 use crate::tools::Identifier;
 use log::{error, info, warn, debug};
 use fut::{ready, Ready};
 
 pub struct Connection {
+    pub game_data: GameData,
+    pub manager: Addr<GameManager>,
+
+}
+
+#[derive(Debug, Clone)]
+pub struct GameData {
     pub hosting: bool,
     pub player_id: Option<Identifier>,
     pub game_id: Option<Identifier>,
-    pub manager: Addr<GameManager>,
+}
+
+impl GameData {
+    fn reset(&mut self) {
+        self.hosting = false;
+        self.player_id = None;
+        self.game_id = None;
+    }
 }
 
 
@@ -25,9 +39,11 @@ type CContext = <Connection as Actor>::Context;
 impl Connection {
     pub fn new(manager: Addr<GameManager>) -> Connection {
         Connection {
-            player_id: None,
-            game_id: None,
-            hosting: false,
+            game_data: GameData {
+                player_id: None,
+                game_id: None,
+                hosting: false,
+            },
             manager,
         }
     }
@@ -66,10 +82,28 @@ impl Connection {
                     act.packet(ctx, ServerPackets::JoinedGame {
                         owner: false,
                         id,
-                        title
+                        title,
                     })
                 }
+                ClientAction::StateChange(state) => {
+                    act.manager.send(ServerAction::DoStateChange {
+                        state,
+                        game_data: act.game_data.clone(),
+                    })
+                        .into_actor(act)
+                        .then(Connection::handle_action)
+                        .wait(ctx);
+                }
+                ClientAction::Disconnect => {
+                    act.game_data.reset()
+                }
+                ClientAction::Multiple(actions) => {
+                    for action in actions {
+                        Connection::handle_action(Ok(action), act, ctx)
+                    }
+                }
                 ClientAction::None => {}
+                _ => {}
             }
             Err(_) => ctx.stop()
         }
@@ -81,7 +115,7 @@ impl Handler<ClientAction> for Connection {
     type Result = ();
 
     fn handle(&mut self, msg: ClientAction, ctx: &mut Self::Context) -> Self::Result {
-       Connection::handle_action(Ok(msg), self, ctx);
+        Connection::handle_action(Ok(msg), self, ctx);
     }
 }
 

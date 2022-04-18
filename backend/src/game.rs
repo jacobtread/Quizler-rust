@@ -6,8 +6,9 @@ use actix::*;
 use actix_web::web::Data;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use crate::Connection;
-use crate::packets::{ClientPackets, GameState, PlayerDataMode, QuestionData, ServerPackets};
+use crate::packets::{ClientPackets, GameState, PlayerDataMode, QuestionData, ServerPackets, StateChange};
 use crate::packets::ServerPackets::PlayerData;
+use crate::socket::GameData;
 use crate::tools::{Identifier, random_identifier};
 
 pub type AnswerIndex = u8;
@@ -60,6 +61,10 @@ pub enum ServerAction {
         packet: ClientPackets,
         ret: Addr<Connection>,
     },
+    DoStateChange {
+        state: StateChange,
+        game_data: GameData,
+    },
     None,
 }
 
@@ -71,6 +76,9 @@ pub enum ClientAction {
     Packet(ServerPackets),
     Error(&'static str),
     JoinedGame { id: Identifier, player_id: Identifier, title: String },
+    StateChange(StateChange),
+    Disconnect,
+    Multiple(Vec<ClientAction>),
     None,
 }
 
@@ -134,7 +142,39 @@ impl Handler<ServerAction> for GameManager {
                         }
                     }
                 }
+                ClientPackets::StateChange { state } => ClientAction::StateChange(state),
                 _ => ClientAction::None
+            }
+            ServerAction::DoStateChange { state, game_data } => {
+                match state {
+                    StateChange::Start => {
+                        if game_data.game_id.is_none() {
+                            ClientAction::Error("You are not in a game.")
+                        } else {
+                            let mut games = self.games.write().unwrap();
+                            let game = games.get_mut(&game_data.game_id.unwrap());
+                            match game {
+                                None => ClientAction::Multiple(vec![
+                                    ClientAction::Error("You are not in a game."),
+                                    ClientAction::Disconnect,
+                                ]),
+                                Some(game) => {
+                                    game.state = GameState::Starting;
+                                    game.broadcast(ServerPackets::GameState { state: GameState::Starting })
+                                }
+                            }
+                        }
+                    }
+                    StateChange::Skip => {}
+                    StateChange::Disconnect => {
+                        if game_data.game_id.is_some() {
+                            if game_data.hosting {
+                                // TODO: Stop game;
+                            } else if game_data.player_id.is_some() {}
+                        }
+                        ClientAction::Disconnect
+                    }
+                }
             }
             _ => ClientAction::None
         })
@@ -150,6 +190,7 @@ pub struct Game {
     pub players: Arc<RwLock<HashMap<Identifier, Player>>>,
     pub state: GameState,
 }
+
 
 impl Game {
     const ID_LENGTH: usize = 5;
@@ -182,6 +223,16 @@ impl Game {
         players.insert(id.clone(), player);
         id
     }
+
+    fn broadcast(&mut self, packet: ServerPackets) {
+        let mut players = self.players.read().unwrap();
+        players.values().for_each(|p| p.ret.do_send(ClientAction::Packet(packet.clone())))
+    }
+
+    fn broadcast_excluding(&mut self, excluding: Identifier, packet: ServerPackets) {
+        let mut players = self.players.read().unwrap();
+        players.values().filter(|p| p.id != excluding).for_each(|p| p.ret.do_send(ClientAction::Packet(packet.clone())))
+    }
 }
 
 
@@ -202,7 +253,7 @@ impl Player {
         ServerPackets::PlayerData {
             id: self.id.clone(),
             name: self.name.clone(),
-            mode
+            mode,
         }
     }
 }
