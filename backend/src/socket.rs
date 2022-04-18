@@ -1,20 +1,22 @@
 use std::io::Cursor;
-use std::net::IpAddr::V4;
-use std::ops::Add;
-use actix::{Handler, Actor, StreamHandler, AsyncContext, Addr, Running, Context, ArbiterHandle, WrapFuture, ActorFutureExt, ContextFutureSpawner, fut, MailboxError, ActorContext};
-use actix::dev::Mailbox;
+use actix::{Actor, StreamHandler, AsyncContext, Addr, WrapFuture, ActorFutureExt, ContextFutureSpawner, fut, MailboxError, ActorContext, MessageResult};
 use actix_web_actors::ws;
 use wsbps::{Readable, Writable};
-use crate::game::{CreatedGame, CreateGame, Game, GameManager, Player};
-use crate::packets::{ClientPackets, GameState, ServerPackets, SGameState, SJoinedGame};
+use crate::game::{CreatedGame, CreateGame, GameManager};
+use crate::packets::{ClientPackets, GameState, SGameState, SJoinedGame};
 use crate::tools::Identifier;
-use log::{error, info, warn};
+use log::{info, warn};
 
 pub struct Connection {
     pub player_id: Option<Identifier>,
     pub game_id: Option<Identifier>,
     pub hosted_id: Option<Identifier>,
     pub manager: Addr<GameManager>,
+}
+
+
+impl Actor for Connection {
+    type Context = ws::WebsocketContext<Self>;
 }
 
 impl Connection {
@@ -27,15 +29,11 @@ impl Connection {
         }
     }
 
-    fn send_packet<W: Writable>(&self, ctx: &mut Self::Context, mut packet: W) {
+    fn send_packet<W: Writable>(&self, ctx: &mut ws::WebsocketContext<Connection>, mut packet: W) {
         let mut out = Vec::new();
         packet.write(&mut out);
         ctx.binary(out)
     }
-}
-
-impl Actor for Connection {
-    type Context = ws::WebsocketContext<Self>;
 }
 
 
@@ -43,10 +41,8 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for Connection {
     fn handle(&mut self, msg: Result<ws::Message, ws::ProtocolError>, ctx: &mut Self::Context) {
         let addr = ctx.address();
         match msg {
-            Ok(ws::Message::Ping(msg)) => ctx.pong(&msg),
-            Ok(ws::Message::Text(text)) => {
-                warn!("Received text message \"{}\".. dont know what to do with it.", String::from(text))
-            }
+            Ok(ws::Message::Ping(msg)) => { ctx.pong(&msg); }
+            Ok(ws::Message::Text(text)) => { warn!("Received text message \"{}\".. dont know what to do with it.",text); }
             Ok(ws::Message::Binary(bin)) => {
                 let mut cursor = Cursor::new(bin.to_vec());
                 match ClientPackets::read(&mut cursor) {
@@ -62,14 +58,14 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for Connection {
                                     .then(|res: Result<CreatedGame, MailboxError>, act, ctx| {
                                         match res {
                                             Ok(res) => {
-                                                self.hosted_id = Some(msg.id.clone());
-                                                self.send_packet(ctx, SJoinedGame {
-                                                    id: msg.id,
+                                                act.hosted_id = Some(res.id.clone());
+                                                act.send_packet(ctx, SJoinedGame {
+                                                    id: res.id.clone(),
                                                     owner: true,
-                                                    title: msg.title,
+                                                    title: res.title.clone(),
                                                 });
-                                                self.send_packet(ctx, SGameState { state: GameState::WAITING });
-                                                info!("Created new game {} ({})", msg.title, msg.id)
+                                                act.send_packet(ctx, SGameState { state: GameState::Waiting });
+                                                info!("Created new game {} ({})", res.title, res.id)
                                             }
                                             // something died
                                             _ => ctx.stop(),
@@ -87,9 +83,9 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for Connection {
                         }
                     }
                     Err(_) => {}
-                }
+                };
             }
             _ => (),
-        }
+        };
     }
 }

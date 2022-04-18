@@ -4,23 +4,23 @@ use wsbps::{packet_data, packets, VarInt};
 packet_data! {
 
     enum GameState (->) (u8) {
-        WAITING: 0,
-        STARTING: 1,
-        STARTED: 2,
-        STOPPED: 3,
-        DOES_NOT_EXIST: 4
+        Waiting: 0,
+        Starting: 1,
+        Started: 2,
+        Stopped: 3,
+        DoesNotExist: 4
     }
 
     enum PlayerDataMode (->) (u8) {
-        ADD: 0,
-        REMOVE: 1,
-        SELF: 2
+        Add: 0,
+        Remove: 1,
+        Me: 2
     }
 
     enum StateChange (<-) (u8) {
-        DISCONNECT: 0,
-        START: 1,
-        SKIP: 2
+        Disconnect: 0,
+        Start: 1,
+        Skip: 2
     }
 
     struct QuestionData (<-) {

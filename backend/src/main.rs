@@ -3,17 +3,12 @@ pub mod game;
 pub mod packets;
 mod tools;
 
-use std::collections::HashMap;
-use std::io::{Cursor, Read};
-use std::ops::Add;
-use std::sync::Arc;
 use actix::{Actor, Addr};
 
 
-use actix_web::{App, Error, get, HttpRequest, HttpResponse, HttpServer, Responder, web};
+use actix_web::{App, get, HttpRequest, HttpResponse, HttpServer, Responder, web};
 use actix_web_actors::ws;
 use crate::game::GameManager;
-use crate::player::Player;
 use crate::socket::Connection;
 
 const APP_INDEX: &str = include_str!("../public/index.html");
@@ -35,8 +30,8 @@ async fn ws_route(req: HttpRequest, stream: web::Payload, manager: web::Data<Add
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    let manager: Addr<GameManager> = GameManager::new().start();
-    HttpServer::new(|| {
+    let manager = GameManager::new().start();
+    HttpServer::new(move || {
         App::new()
             .app_data(web::Data::new(manager.clone()))
             .service(index)
