@@ -1,11 +1,11 @@
 use std::collections::HashMap;
-use std::ops::Add;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use actix::*;
 use actix_web::web::Data;
 use log::info;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+use wsbps::VarInt;
 use crate::Connection;
 use crate::packets::{ClientPackets, GameState, PlayerDataMode, QuestionData, ServerPackets, StateChange};
 use crate::packets::ServerPackets::PlayerData;
@@ -19,10 +19,17 @@ pub struct GameManager {
     pub games: Arc<RwLock<HashMap<Identifier, Game>>>,
 }
 
-const GAME_SLEEP_INTERVAL: Duration = Duration::from_secs(1);
-
 
 impl GameManager {
+    const SLEEP_INTERVAL: Duration = Duration::from_secs(1);
+    const START_DELAY: Duration = Duration::from_secs(5);
+    const QUESTION_TIME: Duration = Duration::from_secs(10);
+    const MARK_TIME: Duration = Duration::from_secs(3);
+    const BONUS_TIME: Duration = Duration::from_secs(5);
+
+    const POINTS: u32 = 100;
+    const BONUS_POINTS: f32 = 200.0;
+
     pub fn new() -> Data<Addr<GameManager>> {
         Data::new(GameManager {
             games: Arc::new(RwLock::new(HashMap::new()))
@@ -30,24 +37,66 @@ impl GameManager {
     }
 }
 
+enum GameChangeType {
+    Remove,
+    Started,
+    SkipQuestion,
+    NextQuestion,
+    SyncTime { total: VarInt, remaining: VarInt },
+    Continue,
+}
+
 impl Actor for GameManager {
     type Context = Context<Self>;
 
     fn started(&mut self, ctx: &mut Self::Context) {
-        ctx.run_interval(GAME_SLEEP_INTERVAL, |act, _ctx| {
+        ctx.run_interval(GameManager::SLEEP_INTERVAL, |act, _ctx| {
             let games = act.games.read().unwrap();
             if games.len() > 0 {
-                let stopped: Vec<&Identifier> = games.par_iter()
-                    .filter(|(id, game)| {
-                        game.state == GameState::Stopped
+                let changes: Vec<(&Identifier, GameChangeType)> = games.par_iter()
+                    .filter(|(_, game)| game.state != GameState::Waiting)
+                    .map(|(id, game)| {
+                        if game.state == GameState::Stopped {
+                            (id, GameChangeType::Remove)
+                        } else {
+                            let time = Instant::now();
+                            let elapsed_since_sync = time - game.time.last_sync;
+                            if game.state == GameState::Starting {
+                                if elapsed_since_sync >= GameManager::START_DELAY {
+                                    (id, GameChangeType::Started)
+                                } else {
+                                    let remaining = time - game.time.game_start;
+                                    (id, GameChangeType::SyncTime {
+                                        total: VarInt::from(GameManager::QUESTION_TIME.as_secs() as u32),
+                                        remaining: VarInt::from(remaining.as_secs() as u32),
+                                    })
+                                }
+                            } else {
+                                (id, GameChangeType::Continue)
+                            }
+                        }
                     })
-                    .map(|(id, _)| id)
                     .collect();
-                if stopped.len() > 0 {
+                if changes.len() > 0 {
                     let mut games = act.games.write().unwrap();
-                    for x in stopped {
-                        games.remove(x)
-                            .expect("failed to remove stopped game");
+                    for change in changes {
+                        match change.1 {
+                            GameChangeType::Remove => {
+                                games.remove(change.0)
+                                    .expect("failed to remove stopped game");
+                            }
+                            GameChangeType::Started => {
+                                games.get_mut(change.0).unwrap().state = GameState::Started;
+                            }
+                            GameChangeType::SkipQuestion => {}
+                            GameChangeType::NextQuestion => {}
+                            GameChangeType::SyncTime { remaining, total } => {
+                                let game = games.get_mut(change.0).unwrap();
+                                info!("Time sync");
+                                game.broadcast(ServerPackets::TimeSync { total, remaining })
+                            }
+                            _ => {}
+                        }
                     }
                 }
             }
@@ -99,14 +148,24 @@ impl Handler<ServerAction> for GameManager {
                         id = random_identifier(Game::ID_LENGTH);
                         if !games.contains_key(&id) { break; };
                     };
+                    let mut q = Vec::with_capacity(questions.len());
+                    for que in questions {
+                        q.push(Question {
+                            data: que,
+                            start_time: Instant::now(),
+                        })
+                    }
                     let game = Game {
                         host: ret,
                         id: id.clone(),
                         title: title.clone(),
-                        questions,
+                        questions: q,
                         players: Arc::new(RwLock::new(HashMap::new())),
                         state: GameState::Waiting,
-                        last_time_sync: Instant::now(),
+                        time: GameTime {
+                            game_start: Instant::now(),
+                            last_sync: Instant::now(),
+                        },
                     };
                     games.insert(id.clone(), game);
                     ClientAction::CreatedGame {
@@ -166,6 +225,7 @@ impl Handler<ServerAction> for GameManager {
                                 ]),
                                 Some(game) => {
                                     game.state = GameState::Starting;
+                                    game.time.game_start = Instant::now();
                                     game.broadcast(ServerPackets::GameState { state: GameState::Starting });
                                     ClientAction::None
                                 }
@@ -217,18 +277,28 @@ impl Handler<ServerAction> for GameManager {
     }
 }
 
+#[derive(Debug)]
+pub struct Question {
+    pub data: QuestionData,
+    pub start_time: Instant,
+}
 
 #[derive(Debug)]
 pub struct Game {
     pub host: Addr<Connection>,
     pub id: Identifier,
     pub title: String,
-    pub questions: Vec<QuestionData>,
+    pub questions: Vec<Question>,
     pub players: Arc<RwLock<HashMap<Identifier, Player>>>,
     pub state: GameState,
-    pub last_time_sync: Instant,
+    pub time: GameTime,
 }
 
+#[derive(Debug)]
+pub struct GameTime {
+    pub last_sync: Instant,
+    pub game_start: Instant,
+}
 
 impl Game {
     const ID_LENGTH: usize = 5;
@@ -247,7 +317,7 @@ impl Game {
                 players.values().for_each(|p| p.ret.do_send(ClientAction::Packet(player.as_data(PlayerDataMode::Remove))));
                 player.ret.do_send(ClientAction::Multiple(vec![
                     ClientAction::Packet(ServerPackets::Disconnect { reason: String::from("Removed from game.") }),
-                    ClientAction::Disconnect
+                    ClientAction::Disconnect,
                 ]))
             }
         }
