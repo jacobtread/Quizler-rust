@@ -1,25 +1,11 @@
 use std::collections::HashMap;
-use actix::{Actor, Addr, Context, Handler, Message, MessageResult, Recipient};
-use actix::dev::MessageResponse;
-use tokio::sync::oneshot::Sender;
+use actix::{Actor, Context, Handler, Message, MessageResult};
 use tokio::time::Instant;
 use crate::packets::QuestionData;
 use crate::tools::{Identifier, random_identifier};
 
 pub type AnswerIndex = u8;
 pub type QuestionIndex = u8;
-
-#[derive(Message)]
-#[rtype(result = "()")]
-pub struct Connect {
-    ret_addr: Recipient<Connected>,
-}
-
-#[derive(Message)]
-#[rtype(result = "()")]
-pub struct Connected {
-    pub manager: Addr<GameManager>,
-}
 
 #[derive(Message)]
 #[rtype(result = "()")]
@@ -42,7 +28,7 @@ pub struct GameManager {
 impl Handler<CreateGame> for GameManager {
     type Result = MessageResult<CreateGame>;
 
-    fn handle(&mut self, msg: CreateGame, ctx: &mut Self::Context) -> Self::Result {
+    fn handle(&mut self, msg: CreateGame, _: &mut Self::Context) -> Self::Result {
         let id = self.new_game(msg.title, msg.questions);
         let game = self.games.get(&id)
             .expect("expected game to be created");

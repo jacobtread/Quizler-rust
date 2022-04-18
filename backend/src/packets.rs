@@ -27,8 +27,8 @@ packet_data! {
         image_type: String,
         image: Vec<u8>,
         question: String,
-        answers: Vec<String>,
-        values: Vec<u8>
+        values: Vec<String>,
+        answers: Vec<u8>
     }
 }
 
