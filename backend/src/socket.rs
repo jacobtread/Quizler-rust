@@ -2,10 +2,11 @@ use std::io::Cursor;
 use actix::*;
 use actix_web_actors::ws;
 use wsbps::{Readable, Writable};
-use crate::game::{CreatedGame, CreateGame, GameManager};
-use crate::packets::{CCreateGame, ClientPackets, GameState, SGameState, SJoinedGame};
+use crate::game::{ClientAction, GameManager, NameTakenResult, ServerAction};
+use crate::packets::{ClientPackets, GameState, ServerPackets};
 use crate::tools::Identifier;
 use log::{error, info, warn};
+use fut::{ready, Ready};
 
 pub struct Connection {
     pub player_id: Option<Identifier>,
@@ -31,31 +32,41 @@ impl Connection {
         }
     }
 
-    fn send_packet<W: Writable>(&self, ctx: &mut CContext, mut packet: W) {
+    fn packet<W: Writable>(&self, ctx: &mut CContext, mut packet: W) {
         let mut out = Vec::new();
         match packet.write(&mut out) {
             Ok(_) => ctx.binary(out),
-            Err(err) => error!("Failed to write packet {}", err),
-
+            Err(err) => error!("Failed to write packet {:?}", err),
         };
     }
 
-    fn on_created_game(res: Result<CreatedGame, MailboxError>, act: &mut Connection, ctx: &mut CContext) -> actix::fut::Ready<()> {
+    fn handle_action(res: Result<ClientAction, MailboxError>, act: &mut Connection, ctx: &mut CContext) -> Ready<()> {
         match res {
-            Ok(res) => {
-                act.hosted_id = Some(res.id.clone());
-                act.send_packet(ctx, SJoinedGame {
-                    id: res.id.clone(),
-                    owner: true,
-                    title: res.title.clone(),
-                });
-                act.send_packet(ctx, SGameState { state: GameState::Waiting });
-                info!("Created new game {} ({})", res.title, res.id)
+            Ok(res) => match res {
+                ClientAction::CreatedGame { id, title } => {
+                    act.hosted_id = Some(id.clone());
+                    act.packet(ctx, ServerPackets::JoinedGame {
+                        id: id.clone(),
+                        owner: true,
+                        title: title.clone(),
+                    });
+                    act.packet(ctx, ServerPackets::GameState { state: GameState::Waiting });
+                    info!("Created new game {} ({})", title, id)
+                }
+                ClientAction::NameTakenResult(result) => {
+                    match result {
+                        NameTakenResult::GameNotFound => {
+                            act.packet(ctx, ServerPackets::Error { cause: String::from("Game doesn't exist") })
+                        }
+                        NameTakenResult::Taken => act.packet(ctx, ServerPackets::NameTakenResult { result: true }),
+                        NameTakenResult::Free => act.packet(ctx, ServerPackets::NameTakenResult { result: false }),
+                    }
+                }
+                ClientAction::None => {}
             }
-            // something died
-            _ => ctx.stop(),
+            Err(_) => ctx.stop()
         }
-        fut::ready(())
+        ready(())
     }
 }
 
@@ -70,23 +81,10 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for Connection {
                 match ClientPackets::read(&mut cursor) {
                     Ok(p) => {
                         println!("{:?}", p);
-                        match p {
-                            ClientPackets::CCreateGame(packet) => {
-                                self.manager.send(CreateGame {
-                                    title: packet.title,
-                                    questions: packet.questions,
-                                })
-                                    .into_actor(self)
-                                    .then(Connection::on_created_game)
-                                    .wait(ctx);
-                            },
-                            ClientPackets::CCheckNameTaken(_) => {}
-                            ClientPackets::CRequestGameState(_) => {}
-                            ClientPackets::CRequestJoin(_) => {}
-                            ClientPackets::CStateChange(_) => {}
-                            ClientPackets::CAnswer(_) => {}
-                            ClientPackets::CKick(_) => {}
-                        }
+                        self.manager.send(ServerAction::Packet(p))
+                            .into_actor(self)
+                            .then(Connection::handle_action)
+                            .wait(ctx);
                     }
                     Err(_) => {}
                 };
