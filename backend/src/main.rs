@@ -52,9 +52,10 @@ async fn main() -> std::io::Result<()> {
         );
     }
 
-    HttpServer::new(|| {
+    let manager = GameManager::new();
+    HttpServer::new(move || {
         App::new()
-            .app_data(GameManager::new())
+            .app_data(manager.clone())
             .route("/ws", get().to(|req: HttpRequest, stream: Payload, manager: Data<Addr<GameManager>>| async move {
                 start(Connection::new(manager.get_ref().clone()), &req, stream)
             }))

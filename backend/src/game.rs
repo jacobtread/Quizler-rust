@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::ops::Add;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use actix::*;
@@ -51,16 +52,13 @@ impl Actor for GameManager {
     }
 }
 
-pub enum NameTakenResult {
-    GameNotFound,
-    Taken,
-    Free,
-}
-
 #[derive(Message)]
 #[rtype(result = "ClientAction")]
 pub enum ServerAction {
-    Packet(ClientPackets),
+    Packet {
+        packet: ClientPackets,
+        ret: Addr<Connection>,
+    },
     None,
 }
 
@@ -68,8 +66,10 @@ pub enum ServerAction {
 #[rtype(result = "()")]
 pub enum ClientAction {
     CreatedGame { id: Identifier, title: String },
-    NameTakenResult(NameTakenResult),
+    NameTakenResult(bool),
     Packet(ServerPackets),
+    Error(&'static str),
+    JoinedGame { id: Identifier, player_id: Identifier, title: String },
     None,
 }
 
@@ -79,7 +79,7 @@ impl Handler<ServerAction> for GameManager {
 
     fn handle(&mut self, msg: ServerAction, _ctx: &mut Self::Context) -> Self::Result {
         MessageResult(match msg {
-            ServerAction::Packet(packet) => match packet {
+            ServerAction::Packet { packet, ret } => match packet {
                 ClientPackets::CreateGame { title, questions } => {
                     let mut id: Identifier;
                     let mut games = self.games.write().unwrap();
@@ -103,14 +103,10 @@ impl Handler<ServerAction> for GameManager {
                 ClientPackets::CheckNameTaken { id, name } => {
                     let games = self.games.read().unwrap();
                     let game = games.get(&id);
-                    ClientAction::NameTakenResult(match game {
-                        None => NameTakenResult::GameNotFound,
-                        Some(game) => if game.is_name_taken(name) {
-                            NameTakenResult::Taken
-                        } else {
-                            NameTakenResult::Free
-                        }
-                    })
+                    match game {
+                        None => ClientAction::Error("That game code doesn't exist"),
+                        Some(game) => ClientAction::NameTakenResult(game.is_name_taken(&name))
+                    }
                 }
                 ClientPackets::RequestGameState { id } => {
                     let games = self.games.read().unwrap();
@@ -122,12 +118,19 @@ impl Handler<ServerAction> for GameManager {
                         }
                     })
                 }
-                ClientPackets::RequestJoin {id, name} => {
-                    let games = self.games.read().unwrap();
-                    let game = games.get(&id);
-                     match game {
-                        None => ClientAction::Packet(ServerPackets::Error {cause: String::from("That game code doesn't exist")}),
-                        Some(game) => game.state.clone()
+                ClientPackets::RequestJoin { id, name } => {
+                    let mut games = self.games.write().unwrap();
+                    let game = games.get_mut(&id);
+                    match game {
+                        None => ClientAction::Error("That game code doesn't exist"),
+                        Some(game) => {
+                            if game.is_name_taken(&name) {
+                                ClientAction::Error("That name is already in use")
+                            } else {
+                                let player_id = game.new_player(name, ret);
+                                ClientAction::JoinedGame { id, player_id, title: game.title.clone() }
+                            }
+                        }
                     }
                 }
                 _ => ClientAction::None
@@ -150,9 +153,9 @@ pub struct Game {
 impl Game {
     const ID_LENGTH: usize = 5;
 
-    fn is_name_taken(&self, name: String) -> bool {
+    fn is_name_taken(&self, name: &String) -> bool {
         let players = self.players.read().unwrap();
-        players.values().any(|v| v.name.eq_ignore_ascii_case(name.as_str()))
+        players.values().any(|v| v.name.eq_ignore_ascii_case(name))
     }
 
     fn new_player(&mut self, name: String, ret: Addr<Connection>) -> Identifier {

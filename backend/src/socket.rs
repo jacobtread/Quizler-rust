@@ -2,7 +2,7 @@ use std::io::Cursor;
 use actix::*;
 use actix_web_actors::ws;
 use wsbps::{Readable, Writable};
-use crate::game::{ClientAction, GameManager, NameTakenResult, ServerAction};
+use crate::game::{ClientAction, GameManager, ServerAction};
 use crate::packets::{ClientPackets, GameState, ServerPackets};
 use crate::tools::Identifier;
 use log::{error, info, warn, debug};
@@ -47,25 +47,27 @@ impl Connection {
                     act.hosting = true;
                     act.game_id = Some(id.clone());
                     act.packet(ctx, ServerPackets::JoinedGame {
-                        id: id.clone(),
                         owner: true,
+                        id: id.clone(),
                         title: title.clone(),
                     });
                     act.packet(ctx, ServerPackets::GameState { state: GameState::Waiting });
                     info!("Created new game {} ({})", title, id)
                 }
-                ClientAction::NameTakenResult(result) => {
-                    match result {
-                        NameTakenResult::GameNotFound => {
-                            act.packet(ctx, ServerPackets::Error { cause: String::from("Game doesn't exist") })
-                        }
-                        NameTakenResult::Taken => act.packet(ctx, ServerPackets::NameTakenResult { result: true }),
-                        NameTakenResult::Free => act.packet(ctx, ServerPackets::NameTakenResult { result: false }),
-                    }
-                }
+                ClientAction::NameTakenResult(result) => act.packet(ctx, ServerPackets::NameTakenResult { result }),
                 ClientAction::Packet(packet) => {
                     debug!("-> {:?}", packet);
                     act.packet(ctx, packet);
+                }
+                ClientAction::Error(msg) => act.packet(ctx, ServerPackets::Error { cause: String::from(msg) }),
+                ClientAction::JoinedGame { id, player_id, title } => {
+                    act.player_id = Some(player_id);
+                    act.game_id = Some(id.clone());
+                    act.packet(ctx, ServerPackets::JoinedGame {
+                        owner: false,
+                        id,
+                        title
+                    })
                 }
                 ClientAction::None => {}
             }
@@ -84,9 +86,13 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for Connection {
             Ok(ws::Message::Binary(bin)) => {
                 let mut cursor = Cursor::new(bin.to_vec());
                 match ClientPackets::read(&mut cursor) {
-                    Ok(p) => {
-                        debug!("<- {:?}", p);
-                        self.manager.send(ServerAction::Packet(p))
+                    Ok(packet) => {
+                        debug!("<- {:?}", packet);
+                        let ret = ctx.address().clone();
+                        self.manager.send(ServerAction::Packet {
+                            packet,
+                            ret,
+                        })
                             .into_actor(self)
                             .then(Connection::handle_action)
                             .wait(ctx);
