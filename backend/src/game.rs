@@ -27,6 +27,13 @@ impl GameManager {
             games: Arc::new(RwLock::new(HashMap::new()))
         }.start())
     }
+
+    pub fn stop(&mut self, game: &mut Game) {
+        game.state = GameState::Stopped;
+        game.broadcast(ServerPackets::Disconnect { reason: String::from("Game ended.") });
+        let mut games = self.games.write().unwrap();
+        games.remove(&game.id);
+    }
 }
 
 impl Actor for GameManager {
@@ -102,6 +109,7 @@ impl Handler<ServerAction> for GameManager {
                         questions,
                         players: Arc::new(RwLock::new(HashMap::new())),
                         state: GameState::Waiting,
+                        last_time_sync: Instant::now(),
                     };
                     games.insert(id.clone(), game);
                     ClientAction::CreatedGame {
@@ -168,9 +176,15 @@ impl Handler<ServerAction> for GameManager {
                     StateChange::Skip => {}
                     StateChange::Disconnect => {
                         if game_data.game_id.is_some() {
-                            if game_data.hosting {
-                                // TODO: Stop game;
-                            } else if game_data.player_id.is_some() {}
+                            let mut games = self.games.write().unwrap();
+                            let game = games.get_mut(&game_data.game_id.unwrap());
+                            if game.is_some() {
+                                if game_data.hosting {
+                                    self.stop(game.unwrap());
+                                } else if game_data.player_id.is_some() {
+                                    game.unwrap().remove_player(game_data.player_id.unwrap())
+                                }
+                            }
                         }
                         ClientAction::Disconnect
                     }
@@ -189,6 +203,7 @@ pub struct Game {
     pub questions: Vec<QuestionData>,
     pub players: Arc<RwLock<HashMap<Identifier, Player>>>,
     pub state: GameState,
+    pub last_time_sync: Instant,
 }
 
 
@@ -198,6 +213,17 @@ impl Game {
     fn is_name_taken(&self, name: &String) -> bool {
         let players = self.players.read().unwrap();
         players.values().any(|v| v.name.eq_ignore_ascii_case(name))
+    }
+
+    fn remove_player(&mut self, id: Identifier) {
+        let mut players = self.players.write().unwrap();
+        let player = players.remove(&id);
+        match player {
+            None => {}
+            Some(player) => {
+                self.broadcast(player.as_data(PlayerDataMode::Remove));
+            }
+        }
     }
 
     fn new_player(&mut self, name: String, ret: Addr<Connection>) -> Identifier {
