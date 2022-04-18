@@ -1,11 +1,7 @@
 use std::collections::HashMap;
-use std::fmt::{Display, Formatter};
-use std::ops::Add;
-use std::sync::{Arc, Mutex};
-use std::thread;
-use std::thread::sleep;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use actix::{Actor, Addr, ArbiterHandle, AsyncContext, Context, Handler, MailboxError, Message, MessageResult, Running, WrapFuture};
+use actix::*;
 use log::info;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use tokio::runtime::Handle;
@@ -32,7 +28,7 @@ pub struct CreateGame {
 }
 
 pub struct GameManager {
-    pub games: HashMap<Identifier, Arc<Mutex<Game>>>,
+    pub games: Arc<RwLock<HashMap<Identifier, Game>>>,
 }
 
 const GAME_SLEEP_INTERVAL: Duration = Duration::from_secs(1);
@@ -42,18 +38,19 @@ impl Handler<CreateGame> for GameManager {
 
     fn handle(&mut self, msg: CreateGame, ctx: &mut Self::Context) -> Self::Result {
         let mut id: Identifier;
+        let mut games = self.games.write().unwrap();
         loop {
             id = random_identifier(Game::ID_LENGTH);
-            if !self.games.contains_key(&id) { break; };
+            if !games.contains_key(&id) { break; };
         };
-        let game = Arc::new(Mutex::new(Game {
+        let game = Game {
             id: id.clone(),
             title: msg.title.clone(),
             questions: msg.questions,
             players: HashMap::new(),
             state: GameState::Waiting,
-        }));
-        self.games.insert(id.clone(), game.clone());
+        };
+        games.insert(id.clone(), game);
         MessageResult(CreatedGame {
             id,
             title: msg.title,
@@ -64,7 +61,7 @@ impl Handler<CreateGame> for GameManager {
 
 impl GameManager {
     pub fn new() -> GameManager {
-        GameManager { games: HashMap::new() }
+        GameManager { games: Arc::new(RwLock::new(HashMap::new())) }
     }
 }
 
@@ -74,11 +71,23 @@ impl Actor for GameManager {
 
     fn started(&mut self, ctx: &mut Self::Context) {
         ctx.run_interval(GAME_SLEEP_INTERVAL, |act, ctx| {
-           act.games.par_iter()
-               .for_each(|(id, game)| {
-                   let game = game.lock().unwrap();
-                   println!("running game loop for {} ({})", game.title, game.id);
-               });
+            let games = act.games.read().unwrap();
+            if games.len() > 0 {
+                let stopped: Vec<&Identifier> = games.par_iter()
+                    .filter(|(id, game)| {
+                        println!("running game loop for {} ({})", game.title, game.id);
+                        game.state == GameState::Stopped
+                    })
+                    .map(|(id, _)| id)
+                    .collect();
+                if stopped.len() > 0 {
+                    let mut games = act.games.write().unwrap();
+                    for x in stopped {
+                        games.remove(x)
+                            .expect("failed to remove stopped game");
+                    }
+                }
+            }
         });
     }
 }
