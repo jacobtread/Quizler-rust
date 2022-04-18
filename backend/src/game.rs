@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use actix::*;
+use actix_web::web::Data;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
-use tokio::time::Instant;
 use crate::Connection;
-use crate::packets::{ClientPackets, GameState, QuestionData};
+use crate::packets::{ClientPackets, GameState, QuestionData, ServerPackets};
 use crate::tools::{Identifier, random_identifier};
 
 pub type AnswerIndex = u8;
@@ -19,8 +19,10 @@ const GAME_SLEEP_INTERVAL: Duration = Duration::from_secs(1);
 
 
 impl GameManager {
-    pub fn new() -> GameManager {
-        GameManager { games: Arc::new(RwLock::new(HashMap::new())) }
+    pub fn new() -> Data<Addr<GameManager>> {
+        Data::new(GameManager {
+            games: Arc::new(RwLock::new(HashMap::new()))
+        }.start())
     }
 }
 
@@ -33,7 +35,6 @@ impl Actor for GameManager {
             if games.len() > 0 {
                 let stopped: Vec<&Identifier> = games.par_iter()
                     .filter(|(id, game)| {
-                        println!("running game loop for {} ({})", game.title, id);
                         game.state == GameState::Stopped
                     })
                     .map(|(id, _)| id)
@@ -68,6 +69,7 @@ pub enum ServerAction {
 pub enum ClientAction {
     CreatedGame { id: Identifier, title: String },
     NameTakenResult(NameTakenResult),
+    Packet(ServerPackets),
     None,
 }
 
@@ -109,6 +111,24 @@ impl Handler<ServerAction> for GameManager {
                             NameTakenResult::Free
                         }
                     })
+                }
+                ClientPackets::RequestGameState { id } => {
+                    let games = self.games.read().unwrap();
+                    let game = games.get(&id);
+                    ClientAction::Packet(ServerPackets::GameState {
+                        state: match game {
+                            None => GameState::DoesNotExist,
+                            Some(game) => game.state.clone()
+                        }
+                    })
+                }
+                ClientPackets::RequestJoin {id, name} => {
+                    let games = self.games.read().unwrap();
+                    let game = games.get(&id);
+                     match game {
+                        None => ClientAction::Packet(ServerPackets::Error {cause: String::from("That game code doesn't exist")}),
+                        Some(game) => game.state.clone()
+                    }
                 }
                 _ => ClientAction::None
             }

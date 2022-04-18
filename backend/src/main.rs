@@ -5,39 +5,62 @@ pub mod game;
 pub mod packets;
 mod tools;
 
-use actix::{Actor, Addr};
-
-
-use actix_web::{App, get, HttpRequest, HttpResponse, HttpServer, Responder, web};
-use actix_web_actors::ws;
+use actix::{Addr};
+use actix_web::{
+    App, HttpRequest, HttpResponse, HttpServer, Responder,
+    web::{Data, get, Payload},
+};
+use actix_web_actors::ws::{start};
 use crate::game::GameManager;
 use crate::socket::Connection;
+use simplelog::{ColorChoice, Config, LevelFilter, TerminalMode, TermLogger};
 
 const APP_INDEX: &str = include_str!("../public/index.html");
 
-
-#[get("/{_:.*}")]
-async fn index() -> impl Responder {
-    HttpResponse::Ok().content_type("text/html").body(APP_INDEX)
-}
-
-#[get("/ws")]
-async fn ws_route(req: HttpRequest, stream: web::Payload, manager: web::Data<Addr<GameManager>>) -> impl Responder {
-    return match ws::start(Connection::new(manager.get_ref().clone()), &req, stream) {
-        Ok(resp) => resp,
-        Err(_) => HttpResponse::InternalServerError().body("Failed to connect")
-    };
-}
-
-
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    let manager = GameManager::new().start();
-    HttpServer::new(move || {
+    const INTRO: &'static str =
+        "   __         __       ___  __  \n\
+              /  \\ |  | |  / |    |__  |__) \n\
+                \\__X \\__/ | /_ |___ |___ |  \\   by Jacobtread\n\n";
+    let port: u16 = option_env!("PORT").unwrap_or("8080").parse::<u16>().expect("expected port to be u16 number");
+    println!(
+        concat!(
+        "{} Version ",
+        env!("CARGO_PKG_VERSION"),
+        "    Server started on http://localhost:{}\n"
+        ), INTRO, port
+    );
+
+    #[cfg(debug_assertions)]
+    {
+        TermLogger::init(
+            LevelFilter::Debug,
+            Config::default(),
+            TerminalMode::Mixed,
+            ColorChoice::Auto,
+        );
+    }
+
+    #[cfg(not(debug_assertions))]
+    {
+        TermLogger::init(
+            LevelFilter::Info,
+            Config::default(),
+            TerminalMode::Mixed,
+            ColorChoice::Auto,
+        );
+    }
+
+    HttpServer::new(|| {
         App::new()
-            .app_data(web::Data::new(manager.clone()))
-            .service(ws_route)
-            .service(index)
+            .app_data(GameManager::new())
+            .route("/ws", get().to(|req: HttpRequest, stream: Payload, manager: Data<Addr<GameManager>>| async move {
+                start(Connection::new(manager.get_ref().clone()), &req, stream)
+            }))
+            .route("/{_:.*}", get().to(|| async {
+                HttpResponse::Ok().content_type("text/html").body(APP_INDEX)
+            }))
     })
         .bind(("127.0.0.1", 8080))?
         .run()

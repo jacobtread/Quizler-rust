@@ -5,13 +5,13 @@ use wsbps::{Readable, Writable};
 use crate::game::{ClientAction, GameManager, NameTakenResult, ServerAction};
 use crate::packets::{ClientPackets, GameState, ServerPackets};
 use crate::tools::Identifier;
-use log::{error, info, warn};
+use log::{error, info, warn, debug};
 use fut::{ready, Ready};
 
 pub struct Connection {
+    pub hosting: bool,
     pub player_id: Option<Identifier>,
     pub game_id: Option<Identifier>,
-    pub hosted_id: Option<Identifier>,
     pub manager: Addr<GameManager>,
 }
 
@@ -27,7 +27,7 @@ impl Connection {
         Connection {
             player_id: None,
             game_id: None,
-            hosted_id: None,
+            hosting: false,
             manager,
         }
     }
@@ -44,7 +44,8 @@ impl Connection {
         match res {
             Ok(res) => match res {
                 ClientAction::CreatedGame { id, title } => {
-                    act.hosted_id = Some(id.clone());
+                    act.hosting = true;
+                    act.game_id = Some(id.clone());
                     act.packet(ctx, ServerPackets::JoinedGame {
                         id: id.clone(),
                         owner: true,
@@ -61,6 +62,10 @@ impl Connection {
                         NameTakenResult::Taken => act.packet(ctx, ServerPackets::NameTakenResult { result: true }),
                         NameTakenResult::Free => act.packet(ctx, ServerPackets::NameTakenResult { result: false }),
                     }
+                }
+                ClientAction::Packet(packet) => {
+                    debug!("-> {:?}", packet);
+                    act.packet(ctx, packet);
                 }
                 ClientAction::None => {}
             }
@@ -80,7 +85,7 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for Connection {
                 let mut cursor = Cursor::new(bin.to_vec());
                 match ClientPackets::read(&mut cursor) {
                     Ok(p) => {
-                        println!("{:?}", p);
+                        debug!("<- {:?}", p);
                         self.manager.send(ServerAction::Packet(p))
                             .into_actor(self)
                             .then(Connection::handle_action)
