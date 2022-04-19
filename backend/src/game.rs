@@ -1,9 +1,9 @@
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, mpsc, RwLock, TryLockResult};
 use std::time::{Duration, Instant};
 use actix::*;
 use actix_web::web::Data;
-use log::info;
+use log::{error, info};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use wsbps::VarInt;
 use crate::Connection;
@@ -37,69 +37,60 @@ impl GameManager {
     }
 }
 
+#[derive(Message)]
+#[rtype(result = "()")]
+#[derive(Debug)]
 enum GameChangeType {
     Remove,
     Started,
     SkipQuestion,
     NextQuestion,
-    SyncTime { total: VarInt, remaining: VarInt },
+    SyncTime { total: Duration, remaining: Duration },
     Continue,
 }
 
 impl Actor for GameManager {
     type Context = Context<Self>;
 
+
     fn started(&mut self, ctx: &mut Self::Context) {
         ctx.run_interval(GameManager::SLEEP_INTERVAL, |act, _ctx| {
-            let games = act.games.read().unwrap();
-            if games.len() > 0 {
-                let changes: Vec<(&Identifier, GameChangeType)> = games.par_iter()
-                    .filter(|(_, game)| game.state != GameState::Waiting)
-                    .map(|(id, game)| {
-                        if game.state == GameState::Stopped {
-                            (id, GameChangeType::Remove)
-                        } else {
-                            let time = Instant::now();
-                            let elapsed_since_sync = time - game.time.last_sync;
-                            if game.state == GameState::Starting {
-                                if elapsed_since_sync >= GameManager::START_DELAY {
-                                    (id, GameChangeType::Started)
-                                } else {
-                                    let remaining = time - game.time.game_start;
-                                    (id, GameChangeType::SyncTime {
-                                        total: VarInt::from(GameManager::QUESTION_TIME.as_secs() as u32),
-                                        remaining: VarInt::from(remaining.as_secs() as u32),
-                                    })
-                                }
-                            } else {
-                                (id, GameChangeType::Continue)
-                            }
-                        }
-                    })
-                    .collect();
-                if changes.len() > 0 {
-                    let mut games = act.games.write().unwrap();
-                    for change in changes {
-                        match change.1 {
-                            GameChangeType::Remove => {
-                                games.remove(change.0)
-                                    .expect("failed to remove stopped game");
-                            }
-                            GameChangeType::Started => {
-                                games.get_mut(change.0).unwrap().state = GameState::Started;
-                            }
-                            GameChangeType::SkipQuestion => {}
-                            GameChangeType::NextQuestion => {}
-                            GameChangeType::SyncTime { remaining, total } => {
-                                let game = games.get_mut(change.0).unwrap();
-                                info!("Time sync");
-                                game.broadcast(ServerPackets::TimeSync { total, remaining })
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
+            let arc = act.games.clone();
+            let mut games = arc.write().unwrap();
+            games.iter_mut().for_each(|(id, game)| game.sync());
+
+            // games.iter_mut()
+            //     .for_each(|(id, game)|{
+            //         game.timer.sync(game);
+            //
+            //     });
+            //
+            // let changes = games.par_iter()
+            //     .filter_map(|(id, mut game)| {
+            //
+            //         if game.state == GameState::Stopped {
+            //             Some((id, GameChangeType::Remove))
+            //         } else if game.state != GameState::Waiting {
+            //             let time = Instant::now();
+            //             let elapsed_since_sync = time - game.time.last_sync;
+            //             if game.state == GameState::Starting {
+            //                 Some(if elapsed_since_sync >= GameManager::START_DELAY {
+            //                     (id, GameChangeType::Started)
+            //                 } else {
+            //                     let remaining = time - game.time.game_start;
+            //                     (id, GameChangeType::SyncTime {
+            //                         total: GameManager::QUESTION_TIME,
+            //                         remaining,
+            //                     })
+            //                 })
+            //             } else {
+            //                 None
+            //             }
+            //         } else {
+            //             None
+            //         }
+            //     })
+            //     .collect::<Vec<(&Identifier, GameChangeType)>>();
         });
     }
 }
@@ -119,7 +110,7 @@ pub enum ServerAction {
     None,
 }
 
-#[derive(Message)]
+#[derive(Message, Clone)]
 #[rtype(result = "()")]
 pub enum ClientAction {
     CreatedGame { id: Identifier, title: String },
@@ -138,7 +129,7 @@ pub enum ClientAction {
 impl Handler<ServerAction> for GameManager {
     type Result = MessageResult<ServerAction>;
 
-    fn handle(&mut self, msg: ServerAction, _ctx: &mut Self::Context) -> Self::Result {
+    fn handle(&mut self, msg: ServerAction, ctx: &mut Self::Context) -> Self::Result {
         MessageResult(match msg {
             ServerAction::Packet { packet, ret } => match packet {
                 ClientPackets::CreateGame { title, questions } => {
@@ -162,10 +153,7 @@ impl Handler<ServerAction> for GameManager {
                         questions: q,
                         players: Arc::new(RwLock::new(HashMap::new())),
                         state: GameState::Waiting,
-                        time: GameTime {
-                            game_start: Instant::now(),
-                            last_sync: Instant::now(),
-                        },
+                        timer: GameTimer::new(),
                     };
                     games.insert(id.clone(), game);
                     ClientAction::CreatedGame {
@@ -225,7 +213,7 @@ impl Handler<ServerAction> for GameManager {
                                 ]),
                                 Some(game) => {
                                     game.state = GameState::Starting;
-                                    game.time.game_start = Instant::now();
+                                    game.timer.track(GameManager::START_DELAY);
                                     game.broadcast(ServerPackets::GameState { state: GameState::Starting });
                                     ClientAction::None
                                 }
@@ -291,13 +279,72 @@ pub struct Game {
     pub questions: Vec<Question>,
     pub players: Arc<RwLock<HashMap<Identifier, Player>>>,
     pub state: GameState,
-    pub time: GameTime,
+    pub timer: GameTimer,
+}
+
+impl Game {
+    pub fn sync(&mut self) {
+        if !self.timer.need_sync { return; }
+        let now = Instant::now();
+        self.timer.elapsed = now - self.timer.start;
+        if self.timer.last_sync + GameTimer::SYNC_DELAY <= now {
+            self.timer.last_sync = now;
+            let remaining = self.timer.remaining();
+            let packet = ServerPackets::TimeSync {
+                total: VarInt(self.timer.duration.as_millis() as u32),
+                remaining: VarInt(remaining as u32),
+            };
+            self.broadcast(packet);
+            if remaining == 0 {
+                self.timer.need_sync = false;
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
 pub struct GameTime {
     pub last_sync: Instant,
     pub game_start: Instant,
+    pub need_sync: bool,
+}
+
+#[derive(Debug)]
+pub struct GameTimer {
+    pub last_sync: Instant,
+    pub start: Instant,
+    pub duration: Duration,
+    pub elapsed: Duration,
+    pub need_sync: bool,
+}
+
+impl GameTimer {
+    const SYNC_DELAY: Duration = Duration::from_secs(2);
+
+    pub fn new() -> GameTimer {
+        GameTimer {
+            last_sync: Instant::now(),
+            start: Instant::now(),
+            duration: Duration::from_secs(0),
+            elapsed: Duration::from_secs(0),
+            need_sync: false,
+        }
+    }
+
+    pub fn track(&mut self, duration: Duration) {
+        self.duration = duration;
+        self.start = Instant::now();
+        self.elapsed = Duration::from_secs(0);
+        self.need_sync = true;
+    }
+
+    pub fn remaining(&self) -> u32 {
+        if self.duration < self.elapsed {
+            0
+        } else {
+            (self.duration - self.elapsed).as_millis() as u32
+        }
+    }
 }
 
 impl Game {
@@ -345,17 +392,18 @@ impl Game {
         ret.do_send(ClientAction::Packet(player.as_data(PlayerDataMode::Me)));
         self.host.do_send(ClientAction::Packet(player.as_data(PlayerDataMode::Add)));
         players.insert(id.clone(), player);
-        info!("Players {:?}", players);
         id
     }
 
-    fn broadcast(&mut self, packet: ServerPackets) {
-        let mut players = self.players.read().unwrap();
-        players.values().for_each(|p| p.ret.do_send(ClientAction::Packet(packet.clone())))
+    fn broadcast(&self, packet: ServerPackets) {
+        let action = ClientAction::Packet(packet);
+        let players = self.players.read().unwrap();
+        players.values().for_each(|p| p.ret.do_send(action.clone()));
+        self.host.do_send(action)
     }
 
-    fn broadcast_excluding(&mut self, excluding: Identifier, packet: ServerPackets) {
-        let mut players = self.players.read().unwrap();
+    fn broadcast_excluding(&self, excluding: Identifier, packet: ServerPackets) {
+        let players = self.players.read().unwrap();
         players.values().filter(|p| p.id != excluding).for_each(|p| p.ret.do_send(ClientAction::Packet(packet.clone())))
     }
 }
