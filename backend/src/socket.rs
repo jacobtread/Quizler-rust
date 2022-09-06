@@ -126,7 +126,7 @@ impl Handler<ClientAction> for Connection {
     type Result = ();
 
     fn handle(&mut self, msg: ClientAction, ctx: &mut Self::Context) -> Self::Result {
-        Connection::handle_action(Ok(msg), self, ctx);
+        let _ = Connection::handle_action(Ok(msg), self, ctx);
     }
 }
 

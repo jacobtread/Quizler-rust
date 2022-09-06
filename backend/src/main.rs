@@ -4,6 +4,7 @@ pub mod socket;
 pub mod game;
 pub mod packets;
 mod tools;
+mod gamev2;
 
 use actix::{Addr};
 use actix_web::{

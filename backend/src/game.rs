@@ -1,14 +1,16 @@
 use std::collections::HashMap;
 use std::sync::{Arc, mpsc, RwLock, TryLockResult};
 use std::time::{Duration, Instant};
+
 use actix::*;
 use actix_web::web::Data;
 use log::{error, info};
-use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+use rayon::iter::{IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator};
 use wsbps::VarInt;
+
 use crate::Connection;
 use crate::packets::{ClientPackets, GameState, PlayerDataMode, QuestionData, ServerPackets, StateChange};
-use crate::packets::ServerPackets::PlayerData;
+use crate::packets::ServerPackets::{PlayerData};
 use crate::socket::GameData;
 use crate::tools::{Identifier, random_identifier};
 
@@ -56,41 +58,29 @@ impl Actor for GameManager {
     fn started(&mut self, ctx: &mut Self::Context) {
         ctx.run_interval(GameManager::SLEEP_INTERVAL, |act, _ctx| {
             let arc = act.games.clone();
-            let mut games = arc.write().unwrap();
-            games.iter_mut().for_each(|(id, game)| game.sync());
+            let mut games = &mut arc.write().unwrap();
 
-            // games.iter_mut()
-            //     .for_each(|(id, game)|{
-            //         game.timer.sync(game);
-            //
-            //     });
-            //
-            // let changes = games.par_iter()
-            //     .filter_map(|(id, mut game)| {
-            //
-            //         if game.state == GameState::Stopped {
-            //             Some((id, GameChangeType::Remove))
-            //         } else if game.state != GameState::Waiting {
-            //             let time = Instant::now();
-            //             let elapsed_since_sync = time - game.time.last_sync;
-            //             if game.state == GameState::Starting {
-            //                 Some(if elapsed_since_sync >= GameManager::START_DELAY {
-            //                     (id, GameChangeType::Started)
-            //                 } else {
-            //                     let remaining = time - game.time.game_start;
-            //                     (id, GameChangeType::SyncTime {
-            //                         total: GameManager::QUESTION_TIME,
-            //                         remaining,
-            //                     })
-            //                 })
-            //             } else {
-            //                 None
-            //             }
-            //         } else {
-            //             None
-            //         }
-            //     })
-            //     .collect::<Vec<(&Identifier, GameChangeType)>>();
+            let keys: Vec<&Identifier> = games.keys()
+                .collect();
+
+
+
+            let removal_keys: Vec<&Identifier> = keys.iter()
+                .filter(|key| {
+                    let key = **key;
+                    let mut game = games.get_mut(key).unwrap();
+                    game.update();
+
+                    game.state == GameState::Stopped
+                })
+                .map(|key| key.clone())
+                .collect();
+
+            for key in removal_keys { // Iterate the stopped ids and remove
+                if let Some(game) = games.remove(key) {
+                    info!("Removed stopped game {} ({})", game.title, game.id);
+                }
+            }
         });
     }
 }
@@ -131,72 +121,7 @@ impl Handler<ServerAction> for GameManager {
 
     fn handle(&mut self, msg: ServerAction, ctx: &mut Self::Context) -> Self::Result {
         MessageResult(match msg {
-            ServerAction::Packet { packet, ret } => match packet {
-                ClientPackets::CreateGame { title, questions } => {
-                    let mut id: Identifier;
-                    let mut games = self.games.write().unwrap();
-                    loop {
-                        id = random_identifier(Game::ID_LENGTH);
-                        if !games.contains_key(&id) { break; };
-                    };
-                    let mut q = Vec::with_capacity(questions.len());
-                    for que in questions {
-                        q.push(Question {
-                            data: que,
-                            start_time: Instant::now(),
-                        })
-                    }
-                    let game = Game {
-                        host: ret,
-                        id: id.clone(),
-                        title: title.clone(),
-                        questions: q,
-                        players: Arc::new(RwLock::new(HashMap::new())),
-                        state: GameState::Waiting,
-                        timer: GameTimer::new(),
-                    };
-                    games.insert(id.clone(), game);
-                    ClientAction::CreatedGame {
-                        id,
-                        title,
-                    }
-                }
-                ClientPackets::CheckNameTaken { id, name } => {
-                    let games = self.games.read().unwrap();
-                    let game = games.get(&id);
-                    match game {
-                        None => ClientAction::Error("That game code doesn't exist"),
-                        Some(game) => ClientAction::NameTakenResult(game.is_name_taken(&name))
-                    }
-                }
-                ClientPackets::RequestGameState { id } => {
-                    let games = self.games.read().unwrap();
-                    let game = games.get(&id);
-                    ClientAction::Packet(ServerPackets::GameState {
-                        state: match game {
-                            None => GameState::DoesNotExist,
-                            Some(game) => game.state.clone()
-                        }
-                    })
-                }
-                ClientPackets::RequestJoin { id, name } => {
-                    let mut games = self.games.write().unwrap();
-                    let game = games.get_mut(&id);
-                    match game {
-                        None => ClientAction::Error("That game code doesn't exist"),
-                        Some(game) => {
-                            if game.is_name_taken(&name) {
-                                ClientAction::Error("That name is already in use")
-                            } else {
-                                let player_id = game.new_player(name, ret);
-                                ClientAction::JoinedGame { id, player_id, title: game.title.clone() }
-                            }
-                        }
-                    }
-                }
-                ClientPackets::StateChange { state } => ClientAction::StateChange(state),
-                ClientPackets::Kick { id } => ClientAction::BeginKick(id),
-                _ => ClientAction::None
+            ServerAction::Packet { packet, ret } => {
             }
             ServerAction::DoStateChange { state, game_data } => {
                 match state {
@@ -205,7 +130,8 @@ impl Handler<ServerAction> for GameManager {
                             ClientAction::Error("You are not in a game.")
                         } else {
                             let mut games = self.games.write().unwrap();
-                            let game = games.get_mut(&game_data.game_id.unwrap());
+                            let game_id = game_data.game_id.unwrap();
+                            let game = games.get_mut(&game_id);
                             match game {
                                 None => ClientAction::Multiple(vec![
                                     ClientAction::Error("You are not in a game."),
@@ -215,6 +141,10 @@ impl Handler<ServerAction> for GameManager {
                                     game.state = GameState::Starting;
                                     game.timer.track(GameManager::START_DELAY);
                                     game.broadcast(ServerPackets::GameState { state: GameState::Starting });
+                                    // let data = game_data.clone();
+                                    // ctx.run_later(GameManager::START_DELAY, move |act,ctx| {
+                                    //     info!("STARTING TIME! {:?}", data)
+                                    // });
                                     ClientAction::None
                                 }
                             }
@@ -299,6 +229,18 @@ impl Game {
                 self.timer.need_sync = false;
             }
         }
+    }
+
+    pub fn update(&mut self) {
+        self.sync();
+        match self.state {
+            GameState::Starting => {
+                if self.timer.elapsed >= GameManager::START_DELAY {
+                    self.state = GameState::Started
+                }
+            }
+            _ => {}
+        };
     }
 }
 
