@@ -5,6 +5,9 @@
 ![LINES OF CODE](https://img.shields.io/tokei/lines/github/jacobtread/Quizler?style=for-the-badge)
 ![LICENSE](https://img.shields.io/github/license/jacobtread/Quizler?style=for-the-badge)
 
+> **Warning** This project has been replaced by [Quizler v2](https://github.com/jacobtread/Quizler-v2) which
+> is a great improvement over this in progress re-write as such this re-write will not be finished
+
 This app is deployed to [https://quizler.jacobtread.com/](https://quizler.jacobtread.com/)
 
 Quizler is a real time quiz app I am making which is similar to games like [Kahoot](https://kahoot.com/). The app is
